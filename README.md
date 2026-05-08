@@ -1,8 +1,14 @@
-# Trading Pattern Bot - Public Showcase
+# TradeBot
 
-This repository is a reduced public version of a larger trading-bot research project.
-It keeps the original project structure and file names, but limits the strategy library
-to ten classical graphical patterns so the code is easier to review, run, and discuss.
+[![CI](https://github.com/ronenme44-jpg/TradeBot/actions/workflows/ci.yml/badge.svg)](https://github.com/ronenme44-jpg/TradeBot/actions/workflows/ci.yml)
+
+TradeBot is a Python trading-bot showcase built around intraday candle ingestion,
+graphical pattern detection, indicator confirmation, risk management, persistence,
+and market-session scheduling.
+
+This public version keeps the original project structure and file names, but limits
+the strategy library to ten classical graphical patterns so the code is easy to
+review, run, and discuss.
 
 The goal of this version is to demonstrate practical Python engineering around market
 data ingestion, pattern detection, signal confirmation, risk management, persistence,
@@ -17,6 +23,7 @@ If you are reviewing the project, start with these files:
 3. `tradeBot_Graphical_Pattern.py` - the reduced graphical pattern detector set.
 4. `tradeBot_indicators_pattern.py` - the indicator confirmation layer.
 5. `tradeBot_Indicator_Rules.py` - the reinforcement-key schema for each pattern.
+6. `tests/test_public_contract.py` - contract tests that protect the public pattern set and market-session behavior.
 
 ## What It Does
 
@@ -46,8 +53,7 @@ Short patterns:
 - `three_black_crows`
 - `dark_cloud_cover`
 
-The private version contains a broader pattern library and more experiment history.
-This public version intentionally keeps the surface area small and readable.
+This public showcase intentionally keeps the strategy surface compact and readable.
 
 ## Architecture
 
@@ -81,6 +87,8 @@ tradeBot_main.py / tradeBot_Pattern_Test.py
 - `generate_shared_candles_stocks.py` - `yfinance` candle collector.
 - `ttp_adapter.py` - optional adapter for JSONL trade-tape style data.
 - `config.py` - fee configuration only. No API keys are required.
+- `tests/test_public_contract.py` - lightweight tests for imports, pattern alignment, reinforcement keys, and session windows.
+- `.github/workflows/ci.yml` - GitHub Actions workflow that compiles the code and runs the tests.
 
 ## Setup
 
@@ -140,14 +148,15 @@ The public configuration is intentionally small:
 
 ## Runtime Behavior
 
-The bot uses regular US equity market hours:
+The runtime modules use regular weekday US equity market hours:
 
 - Market timezone: `America/New_York`
 - Open: `09:30`
 - Close: `16:00`
 
-The training bot includes a post-close grace window for delayed free market data.
-This avoids treating a delayed candle feed as an immediate market-close failure.
+The collector and bots sleep outside the active market window and wake at the next
+regular open. A short post-close grace window is included for delayed free market
+data, so the code does not treat delayed candles as an immediate feed failure.
 
 ## Generated Files
 
@@ -175,6 +184,7 @@ This project demonstrates:
 
 - This version is intentionally limited to ten patterns.
 - The candle collector uses `yfinance`, which can be delayed or unavailable.
+- The market calendar is weekday/session based and does not model exchange holidays or half-days.
 - This is not connected to a production broker execution system.
 - No profitability claim is made.
 

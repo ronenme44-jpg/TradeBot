@@ -6,6 +6,7 @@ import importlib
 import pathlib
 import sys
 import unittest
+from datetime import datetime, timezone
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -79,6 +80,38 @@ class PublicRepoContractTest(unittest.TestCase):
             key,
             "bullish_engulfing|rsi:1,volume:0,volatility:1,trend:1",
         )
+
+    def test_market_session_sleep_windows_are_aligned(self) -> None:
+        """Runtime modules should stop polling outside the market active window."""
+        modules = [
+            importlib.import_module("generate_shared_candles_stocks"),
+            importlib.import_module("tradeBot_main"),
+            importlib.import_module("tradeBot_Pattern_Test"),
+        ]
+
+        # 2026-05-08 is a Friday. 13:30 UTC is 09:30 in New York.
+        market_open_utc = datetime(2026, 5, 8, 13, 30, tzinfo=timezone.utc)
+        post_close_grace_utc = datetime(2026, 5, 8, 20, 10, tzinfo=timezone.utc)
+        after_grace_utc = datetime(2026, 5, 8, 20, 22, tzinfo=timezone.utc)
+
+        for module in modules:
+            with self.subTest(module=module.__name__):
+                open_status = module.market_session_status(market_open_utc)
+                self.assertTrue(open_status["is_open"])
+                self.assertTrue(open_status["is_active_window"])
+
+                grace_status = module.market_session_status(post_close_grace_utc)
+                self.assertFalse(grace_status["is_open"])
+                self.assertTrue(grace_status["is_post_close_grace"])
+                self.assertTrue(grace_status["is_active_window"])
+
+                closed_status = module.market_session_status(after_grace_utc)
+                self.assertFalse(closed_status["is_open"])
+                self.assertFalse(closed_status["is_active_window"])
+                self.assertEqual(
+                    closed_status["next_open_dt"].strftime("%Y-%m-%d %H:%M"),
+                    "2026-05-11 09:30",
+                )
 
 
 if __name__ == "__main__":

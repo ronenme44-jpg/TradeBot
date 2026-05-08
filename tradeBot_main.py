@@ -19,7 +19,7 @@ import json
 import os
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from sklearn.linear_model import LinearRegression
@@ -59,6 +59,7 @@ ALERT_THROTTLE_SECONDS = 120
 
 # Data-quality gates. These protect the bot from acting on stale or broken candle data.
 DATA_STALE_MINUTES = 20
+FREE_DATA_DELAY_MINUTES = DATA_STALE_MINUTES
 DATA_GAP_MULTIPLIER = 3.0
 MAX_SAME_CANDLE_STREAK = 3
 NO_CANDLE_WARN_MULTIPLIER = 2.0
@@ -182,6 +183,8 @@ MARKET_TZ = ZoneInfo("America/New_York")
 LOCAL_TZ = ZoneInfo("Asia/Jerusalem")
 MARKET_OPEN_MINUTE = 9 * 60 + 30   # 09:30 NY
 MARKET_CLOSE_MINUTE = 16 * 60      # 16:00 NY
+POST_CLOSE_GRACE_SECONDS = (FREE_DATA_DELAY_MINUTES + 1) * 60  # delayed free data + 1m after close
+POST_CLOSE_POLL_SECONDS = 60
 FORCED_EXIT_BUFFER_MIN = 10        # force-close open trades this many minutes before close
 ENTRY_BLOCK_BUFFER_MIN = 70        # block new entries 70 minutes before close
 
@@ -195,17 +198,65 @@ def format_percent(x: float) -> str:
 
 
 # --- Market session helpers (US equities regular hours) ---
+def _market_time_on_date(ny_dt: datetime, minute_of_day: int) -> datetime:
+    """Return a New York timestamp on the same date at the requested minute of day."""
+    return ny_dt.replace(
+        hour=minute_of_day // 60,
+        minute=minute_of_day % 60,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _next_regular_market_open(ny_now: datetime) -> datetime:
+    """Return the next regular weekday US equity open in New York time."""
+    candidate = _market_time_on_date(ny_now, MARKET_OPEN_MINUTE)
+    if ny_now.weekday() < 5 and ny_now < candidate:
+        return candidate
+
+    days_ahead = 1
+    while True:
+        next_day = ny_now + timedelta(days=days_ahead)
+        if next_day.weekday() < 5:
+            return _market_time_on_date(next_day, MARKET_OPEN_MINUTE)
+        days_ahead += 1
+
+
+def _format_sleep_duration(seconds: float) -> str:
+    """Format sleep duration for terminal logs without relying on local timezone."""
+    total = max(0, int(round(seconds)))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def market_session_status(now_utc: datetime | None = None) -> dict:
     """Return session flags/timestamps for US market hours, with Israel local time for logging."""
     now_utc = now_utc or datetime.now(timezone.utc)
     ny_now = now_utc.astimezone(MARKET_TZ)
     il_now = now_utc.astimezone(LOCAL_TZ)
 
-    open_dt = ny_now.replace(hour=MARKET_OPEN_MINUTE // 60, minute=MARKET_OPEN_MINUTE % 60, second=0, microsecond=0)
-    close_dt = ny_now.replace(hour=MARKET_CLOSE_MINUTE // 60, minute=MARKET_CLOSE_MINUTE % 60, second=0, microsecond=0)
+    open_dt = _market_time_on_date(ny_now, MARKET_OPEN_MINUTE)
+    close_dt = _market_time_on_date(ny_now, MARKET_CLOSE_MINUTE)
+    sleep_after_close_dt = close_dt + timedelta(seconds=POST_CLOSE_GRACE_SECONDS)
 
     is_weekday = ny_now.weekday() < 5
     is_open = bool(is_weekday and open_dt <= ny_now < close_dt)
+    is_post_close_grace = bool(is_weekday and close_dt <= ny_now < sleep_after_close_dt)
+    is_active_window = bool(is_open or is_post_close_grace)
+    next_open_dt = None if is_active_window else _next_regular_market_open(ny_now)
+    seconds_to_next_open = (
+        max(0.0, (next_open_dt - ny_now).total_seconds())
+        if next_open_dt is not None
+        else 0.0
+    )
     minutes_to_close = (close_dt - ny_now).total_seconds() / 60 if is_weekday else None
     minutes_from_open = (ny_now - open_dt).total_seconds() / 60 if is_weekday else None
 
@@ -215,11 +266,41 @@ def market_session_status(now_utc: datetime | None = None) -> dict:
         "now_il": il_now,
         "is_weekday": is_weekday,
         "is_open": is_open,
+        "is_post_close_grace": is_post_close_grace,
+        "is_active_window": is_active_window,
         "open_dt": open_dt,
         "close_dt": close_dt,
+        "sleep_after_close_dt": sleep_after_close_dt,
+        "next_open_dt": next_open_dt,
+        "seconds_to_next_open": seconds_to_next_open,
         "minutes_to_close": minutes_to_close,
         "minutes_from_open": minutes_from_open,
     }
+
+
+def sleep_until_next_market_open(session: dict) -> None:
+    """Sleep while the US market is closed, waking at the next regular open."""
+    now_ny = session.get("now_ny")
+    if not isinstance(now_ny, datetime):
+        now_ny = datetime.now(timezone.utc).astimezone(MARKET_TZ)
+    next_open = session.get("next_open_dt")
+    if not isinstance(next_open, datetime):
+        next_open = _next_regular_market_open(now_ny)
+
+    seconds_to_open = max(0.0, (next_open - now_ny).total_seconds())
+    next_open_il = next_open.astimezone(LOCAL_TZ)
+    log_alert(
+        "INFO",
+        (
+            "US market closed. Sleeping until next open: "
+            f"NY {next_open.strftime('%Y-%m-%d %H:%M')} | "
+            f"Israel {next_open_il.strftime('%Y-%m-%d %H:%M')} "
+            f"(~{_format_sleep_duration(seconds_to_open)})."
+        ),
+        key="market_sleep_until_open",
+        throttle_seconds=3600,
+    )
+    time.sleep(max(1.0, seconds_to_open))
 
 
 def filter_regular_market_hours(df: pd.DataFrame) -> pd.DataFrame:
@@ -1827,6 +1908,13 @@ if __name__ == "__main__":
         while True:
             try:
                 session = market_session_status()
+                if not session.get("is_active_window"):
+                    sleep_until_next_market_open(session)
+                    last_processed_ts = None
+                    last_seen_ts = None
+                    same_candle_streak = 0
+                    no_candle_warned = False
+                    continue
 
                 # Load candles
                 limit = 390
@@ -2006,7 +2094,12 @@ if __name__ == "__main__":
                             print(f"Entry gate closed before market close (>={ENTRY_BLOCK_BUFFER_MIN}m buffer).")
                 # Poll frequently for new candles
                 try:
-                    time.sleep(max(1, int(POLL_INTERVAL_SECONDS)))
+                    sleep_seconds = (
+                        POST_CLOSE_POLL_SECONDS
+                        if session.get("is_post_close_grace") and not market_open_now
+                        else POLL_INTERVAL_SECONDS
+                    )
+                    time.sleep(max(1, int(sleep_seconds)))
                 except Exception:
                     time.sleep(5)
 
