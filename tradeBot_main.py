@@ -784,6 +784,8 @@ def initialize_all_files():
     init_file(CAPITAL_PATH, DEFAULT_CAPITAL_PAYLOAD)
     init_file(REINFORCEMENT_PATH, DEFAULT_REINFORCEMENT_PAYLOAD)
     init_file(PENDING_PATTERN_PATH, DEFAULT_PENDING_PATTERN)
+    # Main Bot1 keeps a closed-trade audit log. The training bot disables this
+    # separately because high-volume training runs create too much log noise.
     init_file(CLOSED_LOG_PATH, DEFAULT_CLOSED_LOG)
 
 # === CAPITAL ===
@@ -822,6 +824,7 @@ def _strip_internal_fields(trade_data):
 
 # === CLOSED TRADE LOG ===
 def update_closed_trade_log(trade_data, path=CLOSED_LOG_PATH):
+    """Append one closed Bot1 trade to the audit log."""
     logs = safe_read_json(path, DEFAULT_CLOSED_LOG, expect_type=list, purpose="closed trades")
     if not isinstance(logs, list):
         logs = []
@@ -1218,7 +1221,7 @@ def exit_trade(open_trade: dict, exit_price: float, timestamp: str, symbol: str,
         except Exception as e:
             print(f"WARN RL update failed: {e}")
 
-    # Save closed trade log
+    # Save closed Bot1 trades for review and debugging.
     update_closed_trade_log({**open_trade})
 
     # Clear pending

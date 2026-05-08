@@ -113,6 +113,23 @@ class PublicRepoContractTest(unittest.TestCase):
                     "2026-05-11 09:30",
                 )
 
+    def test_closed_trade_logging_policy_is_explicit(self) -> None:
+        """Main bot keeps closed-trade logs; training bot keeps that path disabled."""
+        main_bot = importlib.import_module("tradeBot_main")
+        training_bot = importlib.import_module("tradeBot_Pattern_Test")
+
+        self.assertTrue(hasattr(main_bot, "update_closed_trade_log"))
+        self.assertTrue(callable(main_bot.update_closed_trade_log))
+
+        main_source = (REPO_ROOT / "tradeBot_main.py").read_text(encoding="utf-8")
+        training_source = (REPO_ROOT / "tradeBot_Pattern_Test.py").read_text(encoding="utf-8")
+
+        self.assertIn("init_file(CLOSED_LOG_PATH, DEFAULT_CLOSED_LOG)", main_source)
+        self.assertIn("update_closed_trade_log({**open_trade})", main_source)
+        self.assertIn("# init_file(CLOSED_LOG_PATH, DEFAULT_CLOSED_LOG)", training_source)
+        self.assertIn("# update_closed_trade_log({**open_trade})", training_source)
+        self.assertFalse(hasattr(training_bot, "update_closed_trade_log"))
+
 
 if __name__ == "__main__":
     unittest.main()

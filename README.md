@@ -166,9 +166,13 @@ The bot can create runtime files such as:
 - `Bot*_capital.json`
 - `Bot*_pending_pattern.json`
 - `Bot*_reinforcement_scores.json`
+- `Bot1_closed_trades_log.json`
 - `*_alerts.jsonl`
 
 These files are ignored by Git and are not part of the public repository.
+The main bot keeps `Bot1_closed_trades_log.json` as an audit trail for completed
+trades. The training bot intentionally does not write a closed-trades log because
+training runs can create too much repeated output.
 
 ## Portfolio Notes
 
