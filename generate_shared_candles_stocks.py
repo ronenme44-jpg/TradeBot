@@ -39,6 +39,7 @@ MARKET_CLOSE_MINUTE = 16 * 60
 FREE_DATA_DELAY_MINUTES = 20
 POST_CLOSE_GRACE_SECONDS = (FREE_DATA_DELAY_MINUTES + 1) * 60
 POST_CLOSE_POLL_SECONDS = 60
+PRE_OPEN_WARMUP_SECONDS = 60
 
 
 def _market_time_on_date(ny_dt: datetime, minute_of_day: int) -> datetime:
@@ -87,16 +88,28 @@ def market_session_status(now_utc: datetime | None = None) -> dict:
     il_now = now_utc.astimezone(LOCAL_TZ)
     open_dt = _market_time_on_date(ny_now, MARKET_OPEN_MINUTE)
     close_dt = _market_time_on_date(ny_now, MARKET_CLOSE_MINUTE)
+    warmup_dt = open_dt - timedelta(seconds=PRE_OPEN_WARMUP_SECONDS)
     sleep_after_close_dt = close_dt + timedelta(seconds=POST_CLOSE_GRACE_SECONDS)
 
     is_weekday = ny_now.weekday() < 5
+    is_pre_open_warmup = bool(is_weekday and warmup_dt <= ny_now < open_dt)
     is_open = bool(is_weekday and open_dt <= ny_now < close_dt)
     is_post_close_grace = bool(is_weekday and close_dt <= ny_now < sleep_after_close_dt)
-    is_active_window = bool(is_open or is_post_close_grace)
+    is_active_window = bool(is_pre_open_warmup or is_open or is_post_close_grace)
     next_open_dt = None if is_active_window else _next_regular_market_open(ny_now)
+    next_warmup_dt = (
+        next_open_dt - timedelta(seconds=PRE_OPEN_WARMUP_SECONDS)
+        if next_open_dt is not None
+        else None
+    )
     seconds_to_next_open = (
         max(0.0, (next_open_dt - ny_now).total_seconds())
         if next_open_dt is not None
+        else 0.0
+    )
+    seconds_to_next_warmup = (
+        max(0.0, (next_warmup_dt - ny_now).total_seconds())
+        if next_warmup_dt is not None
         else 0.0
     )
 
@@ -105,14 +118,18 @@ def market_session_status(now_utc: datetime | None = None) -> dict:
         "now_ny": ny_now,
         "now_il": il_now,
         "is_weekday": is_weekday,
+        "is_pre_open_warmup": is_pre_open_warmup,
         "is_open": is_open,
         "is_post_close_grace": is_post_close_grace,
         "is_active_window": is_active_window,
         "open_dt": open_dt,
         "close_dt": close_dt,
+        "warmup_dt": warmup_dt,
         "sleep_after_close_dt": sleep_after_close_dt,
         "next_open_dt": next_open_dt,
+        "next_warmup_dt": next_warmup_dt,
         "seconds_to_next_open": seconds_to_next_open,
+        "seconds_to_next_warmup": seconds_to_next_warmup,
     }
 
 
@@ -125,15 +142,18 @@ def sleep_until_next_market_open(session: dict) -> None:
     if not isinstance(next_open, datetime):
         next_open = _next_regular_market_open(now_ny)
 
-    seconds_to_open = max(0.0, (next_open - now_ny).total_seconds())
+    next_warmup = next_open - timedelta(seconds=PRE_OPEN_WARMUP_SECONDS)
+    seconds_to_warmup = max(0.0, (next_warmup - now_ny).total_seconds())
+    next_warmup_il = next_warmup.astimezone(LOCAL_TZ)
     next_open_il = next_open.astimezone(LOCAL_TZ)
     print(
-        "US market closed. Sleeping until next open: "
-        f"NY {next_open.strftime('%Y-%m-%d %H:%M')} | "
-        f"Israel {next_open_il.strftime('%Y-%m-%d %H:%M')} "
-        f"(~{_format_sleep_duration(seconds_to_open)})."
+        "US market closed. Sleeping until pre-open candle collection: "
+        f"NY {next_warmup.strftime('%Y-%m-%d %H:%M')} | "
+        f"Israel {next_warmup_il.strftime('%Y-%m-%d %H:%M')} "
+        f"(market opens NY {next_open.strftime('%H:%M')} | Israel {next_open_il.strftime('%H:%M')}, "
+        f"~{_format_sleep_duration(seconds_to_warmup)})."
     )
-    time.sleep(max(1.0, seconds_to_open))
+    time.sleep(max(1.0, seconds_to_warmup))
 
 
 def download_yfinance(*args, **kwargs) -> pd.DataFrame:

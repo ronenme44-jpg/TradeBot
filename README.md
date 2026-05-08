@@ -157,6 +157,8 @@ The runtime modules use regular weekday US equity market hours:
 The collector and bots sleep outside the active market window and wake at the next
 regular open. A short post-close grace window is included for delayed free market
 data, so the code does not treat delayed candles as an immediate feed failure.
+The candle collector starts one minute before the regular open so it can seed
+`shared_candles.csv` before the bots begin evaluating signals at `09:30`.
 
 ## Generated Files
 

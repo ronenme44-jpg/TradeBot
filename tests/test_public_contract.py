@@ -90,9 +90,21 @@ class PublicRepoContractTest(unittest.TestCase):
         ]
 
         # 2026-05-08 is a Friday. 13:30 UTC is 09:30 in New York.
+        pre_open_warmup_utc = datetime(2026, 5, 8, 13, 29, tzinfo=timezone.utc)
         market_open_utc = datetime(2026, 5, 8, 13, 30, tzinfo=timezone.utc)
         post_close_grace_utc = datetime(2026, 5, 8, 20, 10, tzinfo=timezone.utc)
         after_grace_utc = datetime(2026, 5, 8, 20, 22, tzinfo=timezone.utc)
+
+        collector = modules[0]
+        collector_warmup = collector.market_session_status(pre_open_warmup_utc)
+        self.assertTrue(collector_warmup["is_pre_open_warmup"])
+        self.assertFalse(collector_warmup["is_open"])
+        self.assertTrue(collector_warmup["is_active_window"])
+
+        for bot_module in modules[1:]:
+            bot_warmup = bot_module.market_session_status(pre_open_warmup_utc)
+            self.assertFalse(bot_warmup["is_open"])
+            self.assertFalse(bot_warmup["is_active_window"])
 
         for module in modules:
             with self.subTest(module=module.__name__):
