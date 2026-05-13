@@ -8,6 +8,8 @@ import sys
 import unittest
 from datetime import datetime, timezone
 
+import pandas as pd
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -141,6 +143,50 @@ class PublicRepoContractTest(unittest.TestCase):
         self.assertIn("# init_file(CLOSED_LOG_PATH, DEFAULT_CLOSED_LOG)", training_source)
         self.assertIn("# update_closed_trade_log({**open_trade})", training_source)
         self.assertFalse(hasattr(training_bot, "update_closed_trade_log"))
+
+    def test_api_fallback_never_fabricates_candles(self) -> None:
+        """Missing CSV/API config should fail closed instead of returning random OHLCV."""
+        modules = [
+            importlib.import_module("tradeBot_main"),
+            importlib.import_module("tradeBot_Pattern_Test"),
+        ]
+
+        for module in modules:
+            with self.subTest(module=module.__name__):
+                original_log_alert = module.log_alert
+                module.log_alert = lambda *args, **kwargs: None
+                try:
+                    self.assertIsNone(module.load_candles_from_api(limit=5))
+                finally:
+                    module.log_alert = original_log_alert
+
+    def test_current_session_unfilled_gaps_block_entries(self) -> None:
+        """Large unfilled gaps in the latest session should close the entry gate."""
+        training_bot = importlib.import_module("tradeBot_Pattern_Test")
+
+        gap_df = pd.DataFrame({
+            "timestamp": [
+                "2026-05-08T13:30:00Z",
+                "2026-05-08T13:31:00Z",
+                "2026-05-08T13:35:00Z",
+            ]
+        })
+        report = training_bot.detect_unfilled_candle_gap_issue(gap_df, interval_minutes=1)
+        self.assertTrue(report["block_entries"])
+        self.assertEqual(report["missing_total"], 3)
+        self.assertEqual(report["max_missing_in_gap"], 3)
+
+        previous_day_gap_df = pd.DataFrame({
+            "timestamp": [
+                "2026-05-07T13:30:00Z",
+                "2026-05-07T13:35:00Z",
+                "2026-05-08T13:30:00Z",
+                "2026-05-08T13:31:00Z",
+            ]
+        })
+        report = training_bot.detect_unfilled_candle_gap_issue(previous_day_gap_df, interval_minutes=1)
+        self.assertFalse(report["block_entries"])
+        self.assertEqual(report["missing_total"], 0)
 
 
 if __name__ == "__main__":

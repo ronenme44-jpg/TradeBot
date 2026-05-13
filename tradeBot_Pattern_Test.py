@@ -448,6 +448,69 @@ def fill_small_candle_gaps(
     return clean.sort_values("timestamp").reset_index(drop=True)
 
 
+def detect_unfilled_candle_gap_issue(
+    df: pd.DataFrame,
+    *,
+    interval_minutes: int,
+    max_missing_per_gap: int = MAX_MISSING_CANDLES_PER_GAP,
+    max_missing_per_session: int = MAX_MISSING_CANDLES_PER_SESSION,
+) -> dict:
+    """Return current-session gap metadata that should block new entries."""
+    report = {
+        "block_entries": False,
+        "missing_total": 0,
+        "max_gap_min": 0.0,
+        "max_missing_in_gap": 0,
+        "max_missing_per_gap": max_missing_per_gap,
+        "max_missing_per_session": max_missing_per_session,
+    }
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return report
+
+    clean = df[["timestamp"]].copy()
+    clean["timestamp"] = pd.to_datetime(clean["timestamp"], utc=True, errors="coerce")
+    clean = clean.dropna(subset=["timestamp"]).sort_values("timestamp")
+    clean = clean.drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
+    if len(clean) < 2:
+        return report
+
+    clean["_session_date"] = clean["timestamp"].dt.tz_convert(MARKET_TZ).dt.date
+    latest_session = clean["_session_date"].iloc[-1]
+    session_ts = clean.loc[clean["_session_date"] == latest_session, "timestamp"].reset_index(drop=True)
+    if len(session_ts) < 2:
+        report["session"] = str(latest_session)
+        return report
+
+    expected_gap_seconds = pd.Timedelta(minutes=max(1.0, float(interval_minutes))).total_seconds()
+    missing_total = 0
+    max_gap_min = 0.0
+    max_missing_in_gap = 0
+
+    for idx in range(len(session_ts) - 1):
+        gap_seconds = (session_ts.iloc[idx + 1] - session_ts.iloc[idx]).total_seconds()
+        if gap_seconds <= expected_gap_seconds:
+            continue
+        steps = int(round(gap_seconds / expected_gap_seconds))
+        missing = max(0, steps - 1)
+        if missing == 0:
+            continue
+        missing_total += missing
+        max_missing_in_gap = max(max_missing_in_gap, missing)
+        max_gap_min = max(max_gap_min, gap_seconds / 60.0)
+
+    report.update({
+        "session": str(latest_session),
+        "missing_total": int(missing_total),
+        "max_gap_min": round(max_gap_min, 2),
+        "max_missing_in_gap": int(max_missing_in_gap),
+        "block_entries": bool(
+            missing_total > max_missing_per_session
+            or max_missing_in_gap > max_missing_per_gap
+        ),
+    })
+    return report
+
+
 def compute_data_delay_minutes(last_ts: pd.Timestamp | None, now_utc: datetime | None = None) -> float | None:
     """Return delay between now and last candle (minutes)."""
     if last_ts is None or pd.isna(last_ts):
@@ -1863,6 +1926,24 @@ if __name__ == "__main__":
                     time.sleep(30)
                     continue
 
+                unfilled_gap_report = detect_unfilled_candle_gap_issue(
+                    df,
+                    interval_minutes=INTERVAL_MINUTES,
+                )
+                unfilled_gap_issue = bool(unfilled_gap_report.get("block_entries"))
+                if unfilled_gap_issue:
+                    log_alert(
+                        "WARN",
+                        (
+                            "Entry gate blocked: "
+                            f"{unfilled_gap_report.get('missing_total', 0)} unfilled candle(s) "
+                            f"in current {source} session."
+                        ),
+                        key=f"entry_block_missing:{source}",
+                        details=unfilled_gap_report,
+                        throttle_seconds=300,
+                    )
+
                 gap_min = None
                 if len(ts_series) >= 2 and not pd.isna(ts_series.iloc[-2]):
                     try:
@@ -1904,7 +1985,7 @@ if __name__ == "__main__":
 
                 minutes_to_close = session.get("minutes_to_close")
                 market_open_now = bool(session.get("is_open"))
-                data_ok_for_entries = not data_gap_issue and not data_stale
+                data_ok_for_entries = not data_gap_issue and not data_stale and not unfilled_gap_issue
                 allow_new_entries = market_open_now and data_ok_for_entries and not (
                     minutes_to_close is not None and minutes_to_close <= ENTRY_BLOCK_BUFFER_MIN
                 )
@@ -1970,7 +2051,7 @@ if __name__ == "__main__":
                         print("US market is closed. Skipping entries until the next session window.")
                     elif not allow_new_entries:
                         if not data_ok_for_entries:
-                            print("Entry gate closed due to data gap/stale data.")
+                            print("Entry gate closed due to data gap/stale/unfilled candles.")
                         else:
                             print(f"Entry gate closed before market close (>={ENTRY_BLOCK_BUFFER_MIN}m buffer).")
                 # Poll frequently for new candles
