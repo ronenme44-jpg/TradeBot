@@ -160,21 +160,42 @@ class PublicRepoContractTest(unittest.TestCase):
                 finally:
                     module.log_alert = original_log_alert
 
-    def test_current_session_unfilled_gaps_block_entries(self) -> None:
-        """Large unfilled gaps in the latest session should close the entry gate."""
+    def test_large_current_session_gaps_are_filled_before_entry_gate(self) -> None:
+        """Large in-session gaps should be interpolated before entry gating."""
         training_bot = importlib.import_module("tradeBot_Pattern_Test")
 
         gap_df = pd.DataFrame({
             "timestamp": [
                 "2026-05-08T13:30:00Z",
                 "2026-05-08T13:31:00Z",
-                "2026-05-08T13:35:00Z",
-            ]
+                "2026-05-08T13:40:00Z",
+            ],
+            "open": [100.0, 100.0, 110.0],
+            "high": [101.0, 102.0, 111.0],
+            "low": [99.0, 100.0, 109.0],
+            "close": [100.0, 101.0, 110.0],
+            "volume": [1000.0, 1000.0, 1000.0],
         })
         report = training_bot.detect_unfilled_candle_gap_issue(gap_df, interval_minutes=1)
         self.assertTrue(report["block_entries"])
-        self.assertEqual(report["missing_total"], 3)
-        self.assertEqual(report["max_missing_in_gap"], 3)
+        self.assertEqual(report["missing_total"], 8)
+        self.assertEqual(report["max_missing_in_gap"], 8)
+
+        original_log_alert = training_bot.log_alert
+        training_bot.log_alert = lambda *args, **kwargs: None
+        try:
+            filled = training_bot.fill_small_candle_gaps(gap_df, source="test", interval_minutes=1)
+        finally:
+            training_bot.log_alert = original_log_alert
+
+        self.assertEqual(len(filled), 11)
+        first_fill = filled.loc[filled["timestamp"] == pd.Timestamp("2026-05-08T13:32:00Z")].iloc[0]
+        self.assertAlmostEqual(first_fill["open"], 101.0)
+        self.assertAlmostEqual(first_fill["close"], 102.0)
+
+        report = training_bot.detect_unfilled_candle_gap_issue(filled, interval_minutes=1)
+        self.assertFalse(report["block_entries"])
+        self.assertEqual(report["missing_total"], 0)
 
         previous_day_gap_df = pd.DataFrame({
             "timestamp": [

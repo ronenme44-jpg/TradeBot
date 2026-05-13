@@ -63,7 +63,8 @@ DATA_GAP_MULTIPLIER = 3.0
 MAX_SAME_CANDLE_STREAK = 3
 NO_CANDLE_WARN_MULTIPLIER = 2.0
 
-# Small missing gaps can be filled with flat candles. Larger gaps block entries.
+# Missing in-session gaps are interpolated from surrounding candles.
+# The thresholds remain in alert metadata so large fills are visible.
 FILL_MISSING_CANDLES = True
 MAX_MISSING_CANDLES_PER_GAP = 2
 MAX_MISSING_CANDLES_PER_SESSION = 3
@@ -323,8 +324,8 @@ def fill_small_candle_gaps(
     max_missing_per_session: int = MAX_MISSING_CANDLES_PER_SESSION,
 ) -> pd.DataFrame:
     """
-    Fill small gaps between consecutive candles using flat synthetic bars (prev close).
-    Keeps the bot resilient when a candle is missing inside the window.
+    Fill in-session gaps between consecutive candles using surrounding prices.
+    Keeps the bot resilient when candles are missing inside the window.
     """
     if df is None or df.empty or "timestamp" not in df.columns:
         return df
@@ -347,7 +348,8 @@ def fill_small_candle_gaps(
     total_missing = 0
     total_filled = 0
     max_gap_min = 0.0
-    skipped_sessions = 0
+    large_gap_sessions = 0
+    unfilled_gaps = 0
 
     for _, group in clean.groupby("_session_date", sort=True):
         group = group.drop(columns=["_session_date"]).sort_values("timestamp").reset_index(drop=True)
@@ -383,29 +385,35 @@ def fill_small_candle_gaps(
             frames.append(group)
             continue
 
-        too_many_missing = missing_total > max_missing_per_session or any(m > max_missing_per_gap for _, m in gaps)
-        if too_many_missing:
-            skipped_sessions += 1
-            frames.append(group)
-            continue
+        if missing_total > max_missing_per_session or any(m > max_missing_per_gap for _, m in gaps):
+            large_gap_sessions += 1
 
         filled_rows = []
         for idx, missing in gaps:
             prev_close = _safe_float(group.at[idx, "close"])
             if prev_close is None or prev_close <= 0:
-                prev_close = _safe_float(group.at[idx + 1, "open"]) or _safe_float(group.at[idx + 1, "close"])
-            if prev_close is None or prev_close <= 0:
+                prev_close = _safe_float(group.at[idx, "open"])
+            next_anchor = _safe_float(group.at[idx + 1, "open"])
+            if next_anchor is None or next_anchor <= 0:
+                next_anchor = _safe_float(group.at[idx + 1, "close"])
+            if prev_close is None or prev_close <= 0 or next_anchor is None or next_anchor <= 0:
+                unfilled_gaps += 1
                 continue
             base_ts = group.at[idx, "timestamp"]
+            prev_step_close = prev_close
             for step in range(1, missing + 1):
+                ratio = step / (missing + 1)
+                close_px = prev_close + ((next_anchor - prev_close) * ratio)
+                open_px = prev_step_close
                 filled_rows.append({
                     "timestamp": base_ts + expected_gap * step,
-                    "open": prev_close,
-                    "high": prev_close,
-                    "low": prev_close,
-                    "close": prev_close,
+                    "open": open_px,
+                    "high": max(open_px, close_px),
+                    "low": min(open_px, close_px),
+                    "close": close_px,
                     "volume": 0.0,
                 })
+                prev_step_close = close_px
 
         if filled_rows:
             filled_df = pd.DataFrame(filled_rows)
@@ -424,7 +432,9 @@ def fill_small_candle_gaps(
                 "filled": total_filled,
                 "missing_total": total_missing,
                 "max_gap_min": round(max_gap_min, 2),
-                "skipped_sessions": skipped_sessions,
+                "large_gap_sessions": large_gap_sessions,
+                "unfilled_gaps": unfilled_gaps,
+                "method": "linear_interpolate_prev_close_to_next_open",
             },
         )
     elif total_missing:
@@ -437,7 +447,8 @@ def fill_small_candle_gaps(
                 "max_gap_min": round(max_gap_min, 2),
                 "max_missing_per_gap": max_missing_per_gap,
                 "max_missing_per_session": max_missing_per_session,
-                "skipped_sessions": skipped_sessions,
+                "large_gap_sessions": large_gap_sessions,
+                "unfilled_gaps": unfilled_gaps,
             },
         )
 
