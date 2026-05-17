@@ -129,6 +129,37 @@ Run the lightweight contract tests:
 python -m unittest discover -s tests
 ```
 
+## Local Auto-Restart on macOS
+
+The repository includes `launchd` LaunchAgents for local restart management of:
+
+- `generate_shared_candles_stocks.py`
+- `tradeBot_main.py`
+- `tradeBot_main_7.py`
+
+Install and start the local agents:
+
+```bash
+./scripts/install_launch_agents.sh
+```
+
+Check status:
+
+```bash
+./scripts/status_launch_agents.sh
+```
+
+Stop and remove the agents:
+
+```bash
+./scripts/uninstall_launch_agents.sh
+```
+
+The agents use `KeepAlive` to restart crashed processes and `caffeinate -is` to
+reduce automatic idle sleep while they run. They cannot keep the bot alive while
+the Mac is shut down, manually sleeping, or sleeping because a laptop lid is
+closed.
+
 By default the symbol is `AAPL`. To test another equity, update `SYMBOL` in:
 
 - `generate_shared_candles_stocks.py`
